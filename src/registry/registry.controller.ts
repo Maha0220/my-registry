@@ -69,7 +69,7 @@ export class RegistryController {
   ) {
     await this.registry.appendChunk(repo, uuid, req);
     res.setHeader('Location', `/v2/${repo}/blobs/uploads/${uuid}`);
-    res.status(HttpStatus.ACCEPTED).send();
+    return res.status(HttpStatus.ACCEPTED).send();
   }
 
   @Put('/:repo/blobs/uploads/:uuid')

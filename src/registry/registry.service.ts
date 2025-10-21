@@ -18,9 +18,9 @@ export class RegistryService {
   async appendChunk(repo: string, uuid: string, req: any) {
     const uploadPath = this.store.getUploadPath(repo, uuid);
     const ws = createWriteStream(uploadPath, { flags: 'a' });
-    await new Promise((resolve, reject) => {
+    return new Promise((resolve, reject) => {
       req.pipe(ws);
-      req.on('end', resolve);
+      req.on('finish', resolve);
       req.on('error', reject);
     });
   }
