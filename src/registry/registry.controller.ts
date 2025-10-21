@@ -136,7 +136,7 @@ export class RegistryController {
   appendChunk(
       @Param('name') name: string,
       @Param('uuid') uuid: string,
-      @Req() req: RawBodyRequest<Request>, // Express Request 객체를 직접 사용하여 데이터 스트림 처리
+      @Req() req: RawBodyRequest<Request>,
       @Res() res: Response
   ) {
       const repoDir = this.getRepoDir(name);
@@ -177,7 +177,7 @@ export class RegistryController {
       req.pipe(fileStream);
   }
 
-  // 3.3. Blob 업로드 완료 (PUT) - Monolithic Upload (단일 요청 업로드 처리)
+  // 3.3. Blob 업로드 완료 (PUT)
   @Put('/:name/blobs/uploads/:uuid')
   completeBlobUpload(
     @Param('name') name: string,
@@ -262,33 +262,49 @@ export class RegistryController {
   putManifest(
     @Param('name') name: string,
     @Param('reference') reference: string,
-    @Body() manifest: any,
+    @Req() req: RawBodyRequest<Request>,
     @Res() res: Response,
   ) {
     console.log(`4.2. Manifest PUT: ${name} with reference ${reference}`);
 
+    const filePath = path.join(
+      this.getRepoDir(name),
+      `manifests-${reference}.json`,
+    );
+
+    const fileStream = fs.createWriteStream(filePath, { flags: 'w' });
+    
+    fileStream.on('finish', () => {
+
+      const manifest = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+      repositoryState[name] = repositoryState[name] || {
+        blobs: {},
+        manifest: null,
+      };
+      repositoryState[name].manifest = manifest;
+      // Manifest의 다이제스트 계산 및 헤더 반환
+      const manifest_digest =
+        'sha256:' +
+        crypto
+          .createHash('sha256')
+          .update(JSON.stringify(manifest))//warn
+          .digest('hex');
+
+      res.set('Content-Length', '0');
+      res.set('Docker-Content-Digest', manifest_digest);
+      return res.status(HttpStatus.CREATED).end();
+    });
+
+    fileStream.on('error', (err) => {
+        console.error('File stream error during Put manifest:', err);
+        return res.status(HttpStatus.INTERNAL_SERVER_ERROR).send('File write error');
+    });
     // ********* 핵심 검증 로직 (스터디 필수) *********
     // 실제 Manifest 푸시 전에, Manifest에 명시된 모든 config/layer (Blob)들이
     // repositoryState[name].blobs에 존재하는지 확인해야 합니다.
     // 만약 하나라도 없으면 400 Bad Request 에러를 반환해야 합니다.
     // *******************************************
-
-    repositoryState[name] = repositoryState[name] || {
-      blobs: {},
-      manifest: null,
-    };
-    repositoryState[name].manifest = manifest;
-
-    // Manifest의 다이제스트 계산 및 헤더 반환
-    const manifest_digest =
-      'sha256:' +
-      crypto
-        .createHash('sha256')
-        .update(JSON.stringify(manifest))
-        .digest('hex');
-
-    res.set('Content-Length', '0');
-    res.set('Docker-Content-Digest', manifest_digest);
-    return res.status(HttpStatus.CREATED).end();
+    
+    req.pipe(fileStream);
   }
 }
