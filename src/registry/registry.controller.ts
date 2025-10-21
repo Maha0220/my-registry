@@ -9,6 +9,7 @@ import {
   Res,
   Query,
   HttpStatus,
+  Patch,
 } from '@nestjs/common';
 import type { Response } from 'express';
 import * as path from 'path';
@@ -126,6 +127,14 @@ export class RegistryController {
     res.set('Range', '0-0');
     res.set('Docker-Upload-UUID', session_uuid);
     return res.status(HttpStatus.ACCEPTED).end();
+  }
+
+  // chucked 업로드는 지원하지 않음 (임시로 405 반환)
+  @Patch('/:name/blobs/uploads/:uuid')
+  patchBlobUpload(
+    @Res() res: Response,
+  ) {
+    return res.status(HttpStatus.METHOD_NOT_ALLOWED).send('Use monolithic upload');;
   }
 
   // 3.3. Blob 업로드 완료 (PUT) - Monolithic Upload (단일 요청 업로드 처리)

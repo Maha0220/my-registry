@@ -37,7 +37,7 @@ COPY --from=builder /app/dist ./dist
 # HEALTHCHECK CMD curl -f http://localhost:3000/health || exit 1
 
 # 포트 노출 (NestJS 기본 3000)
-EXPOSE 3000
+EXPOSE 5000
 
 # 실행 명령
 CMD ["node", "dist/main.js"]
