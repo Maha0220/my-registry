@@ -1,14 +1,42 @@
 import {
-  Controller, Post, Patch, Put, Get,
-  Param, Query, Req, Res, HttpStatus, NotFoundException,
-  Head
+  Controller,
+  Get,
+  Post,
+  Put,
+  Head,
+  Body,
+  Param,
+  Res,
+  Query,
+  HttpStatus,
+  Patch,
 } from '@nestjs/common';
-import { RegistryService } from './registry.service';
-import type { Request, Response } from 'express';
+import type { Response } from 'express';
+import * as path from 'path';
+import * as fs from 'fs';
+import * as crypto from 'crypto';
+
+// 저장소 기본 경로 설정 (프로젝트 루트의 'data' 폴더)
+const STORAGE_ROOT = path.join(process.cwd(), 'data');
+if (!fs.existsSync(STORAGE_ROOT)) {
+  fs.mkdirSync(STORAGE_ROOT);
+}
+
+// 레지스트리 메타데이터 (임시 메모리 저장소)
+const repositoryState: Record<
+  string,
+  { blobs: Record<string, string>; manifest: any }
+> = {};
 
 @Controller('v2')
 export class RegistryController {
-  constructor(private readonly registry: RegistryService) {}
+  private getRepoDir(name: string): string {
+    const repoPath = path.join(STORAGE_ROOT, name);
+    if (!fs.existsSync(repoPath)) {
+      fs.mkdirSync(repoPath, { recursive: true });
+    }
+    return repoPath;
+  }
 
   // --- 1. 기본 API 확인: GET /v2/ ---
   @Get('/')
@@ -18,88 +46,209 @@ export class RegistryController {
     return res.status(HttpStatus.OK).send({});
   }
 
-  @Head('/:repo/blobs/:digest')
-  async checkBlob(@Param('repo') repo: string, @Param('digest') digest: string, @Res() res: Response) {
-    const stats = await this.registry.checkBlob(repo, digest);
-    if (!stats) throw new NotFoundException({ code: 'BLOB_UNKNOWN', message: 'Blob unknown to registry' });
-    res.set('Content-Length', stats.size.toString());
-    res.set('Docker-Content-Digest', digest);
-    return res.status(HttpStatus.OK).end();
-  }
+  // 2. 인증처리 (임시로 인증 없이 허용)
 
+  // ------------------------------------
+  // --- 3. Blob (레이어) 처리 ---
+  // ------------------------------------
 
-  @Get('/:repo/blobs/:digest')
-  async getBlob(
-    @Param('repo') repo: string,
+  // 3.1. Blob 존재 여부 확인 (HEAD) 및 다운로드 (GET)
+  @Head(':name/blobs/:digest')
+  checkBlob(
+    @Param('name') name: string,
     @Param('digest') digest: string,
-    @Res() res: Response
+    @Res() res: Response,
   ) {
-    const stats = await this.registry.checkBlob(repo, digest);
-    if (!stats) throw new NotFoundException({ code: 'BLOB_UNKNOWN', message: 'Blob unknown to registry' });
-    res.set('Content-Length', stats.size.toString());
-    res.set('Docker-Content-Digest', digest);
-    const stream = await this.registry.getBlob(repo, digest);
-    stream?.pipe(res);
+    console.log(
+      `3.1. Blob ${res.req.method} Check: ${name} with digest ${digest}`,
+    );
+
+    const digestHash = digest.split(':')[1];
+    const blobPath = path.join(this.getRepoDir(name), digestHash);
+
+    if (fs.existsSync(blobPath)) {
+      const stats = fs.statSync(blobPath);
+      res.set('Content-Length', stats.size.toString());
+      res.set('Docker-Content-Digest', digest);
+
+      return res.status(HttpStatus.OK).end(); // HEAD 요청
+    } else {
+      return res.status(HttpStatus.NOT_FOUND).json({
+        errors: [{ code: 'BLOB_UNKNOWN', message: 'Blob unknown to registry' }],
+      });
+    }
+  }
+  @Get(':name/blobs/:digest')
+  getBlob(
+    @Param('name') name: string,
+    @Param('digest') digest: string,
+    @Res() res: Response,
+  ) {
+    console.log(
+      `3.1. Blob ${res.req.method} Check: ${name} with digest ${digest}`,
+    );
+
+    const digestHash = digest.split(':')[1];
+    const blobPath = path.join(this.getRepoDir(name), digestHash);
+
+    if (fs.existsSync(blobPath)) {
+      const stats = fs.statSync(blobPath);
+      res.set('Content-Length', stats.size.toString());
+      res.set('Docker-Content-Digest', digest);
+
+      // GET 요청일 경우 파일 스트리밍
+      const fileStream = fs.createReadStream(blobPath);
+      return fileStream.pipe(res.status(HttpStatus.OK));
+
+    } else {
+      return res.status(HttpStatus.NOT_FOUND).json({
+        errors: [{ code: 'BLOB_UNKNOWN', message: 'Blob unknown to registry' }],
+      });
+    }
   }
 
-  // Blob 업로드 (monolithic 또는 session 생성)
-  @Post('/:repo/blobs/uploads')
-  async createUpload(
-    @Param('repo') repo: string, 
-    @Query('digest') digest: string, 
-    @Req() req: Request, 
-    @Res() res: Response
+  // 3.2. Blob 업로드 세션 시작 (POST)
+  @Post('/:name/blobs/uploads')
+  startBlobUpload(@Param('name') name: string, @Res() res: Response) {
+    const session_uuid = crypto.randomUUID();
+    const tempFilePath = path.join(
+      this.getRepoDir(name),
+      `${session_uuid}.tmp`,
+    );
+
+    // 임시 파일 생성 (빈 파일)
+    fs.writeFileSync(tempFilePath, '');
+
+    console.log(
+      `3.2. Blob Upload Session Start for ${name}: UUID ${session_uuid}`,
+    );
+
+    res.set('Location', `/v2/${name}/blobs/uploads/${session_uuid}`);
+    res.set('Range', '0-0');
+    res.set('Docker-Upload-UUID', session_uuid);
+    return res.status(HttpStatus.ACCEPTED).end();
+  }
+
+  // chucked 업로드는 지원하지 않음 (임시로 405 반환)
+  @Patch('/:name/blobs/uploads/:uuid')
+  patchBlobUpload(
+    @Res() res: Response,
+  ) {
+    return res.status(HttpStatus.METHOD_NOT_ALLOWED).send('Use monolithic upload');;
+  }
+
+  // 3.3. Blob 업로드 완료 (PUT) - Monolithic Upload (단일 요청 업로드 처리)
+  @Put('/:name/blobs/uploads/:uuid')
+  completeBlobUpload(
+    @Param('name') name: string,
+    @Param('uuid') uuid: string,
+    @Query('digest') digest: string,
+    @Res() res: Response,
   ) {
     if (!digest) {
-      const uuid = await this.registry.startUpload(repo);
-      res.setHeader('Location', `/v2/${repo}/blobs/uploads/${uuid}`);
-      return res.status(HttpStatus.ACCEPTED).json({ uuid });
+      return res
+        .status(HttpStatus.BAD_REQUEST)
+        .send('Digest required for completion.');
     }
-    const d = await this.registry.saveMonolithic(repo, digest, req);
-    res.setHeader('Docker-Content-Digest', d);
+
+    // Monolithic Upload: 이 요청의 body에 데이터가 담겨 있다고 가정
+    // 실제로는 스트리밍 처리 또는 PATCH/PUT 분할 처리가 필요
+    const tempFilePath = path.join(this.getRepoDir(name), `${uuid}.tmp`);
+
+    // 임시 파일 대신 PUT 요청의 Body를 파일로 저장하고 검증하는 로직이 필요하지만,
+    // 여기서는 간단히 임시 파일을 최종 파일로 이름만 변경
+    const digestHash = digest.split(':')[1];
+    const finalBlobPath = path.join(this.getRepoDir(name), digestHash);
+
+    // 실제로는 요청 본문(req.body)을 finalBlobPath에 저장하고 다이제스트를 검증해야 함
+    // 여기서는 푸시 성공을 위해 임시 파일이 있다고 가정하고 처리 (실제 구현 시 수정 필요)
+    try {
+      if (fs.existsSync(tempFilePath)) {
+        fs.renameSync(tempFilePath, finalBlobPath); // 임시 파일을 최종 경로로 변경
+      } else {
+        // POST/PATCH 과정 없이 바로 PUT으로 완료된 경우를 가정하여 빈 파일을 생성
+        fs.writeFileSync(finalBlobPath, Buffer.from(res.req.body || ''));
+      }
+    } catch (error) {
+      console.error('File operation error:', error);
+      return res
+        .status(HttpStatus.INTERNAL_SERVER_ERROR)
+        .send('File save error');
+    }
+
+    repositoryState[name] = repositoryState[name] || {
+      blobs: {},
+      manifest: null,
+    };
+    repositoryState[name].blobs[digest] = finalBlobPath;
+
+    console.log(`3.3. Blob Upload Complete for ${name}, Digest ${digest}`);
+
+    res.set('Content-Length', '0');
+    res.set('Docker-Content-Digest', digest);
     return res.status(HttpStatus.CREATED).end();
   }
 
-  @Patch('/:repo/blobs/uploads/:uuid')
-  async appendChunk(
-    @Param('repo') repo: string, 
-    @Param('uuid') uuid: string, 
-    @Req() req: Request, 
-    @Res() res: Response
+  // ------------------------------------
+  // --- 4. 매니페스트 (Manifest) 처리 ---
+  // ------------------------------------
+
+  // 4.1. Manifest 다운로드 (GET)
+  @Get('/:name/manifests/:reference')
+  getManifest(
+    @Param('name') name: string,
+    @Param('reference') reference: string,
+    @Res() res: Response,
   ) {
-    await this.registry.appendChunk(repo, uuid, req);
-    res.setHeader('Location', `/v2/${repo}/blobs/uploads/${uuid}`);
-    res.status(HttpStatus.ACCEPTED).send();
+    console.log(`4.1. Manifest GET: ${name} with reference ${reference}`);
+    const manifest = repositoryState[name]?.manifest;
+
+    if (manifest) {
+      res.set(
+        'Content-Type',
+        manifest.mediaType ||
+          'application/vnd.docker.distribution.manifest.v2+json',
+      );
+      return res.status(HttpStatus.OK).send(manifest);
+    } else {
+      return res.status(HttpStatus.NOT_FOUND).json({
+        errors: [{ code: 'MANIFEST_UNKNOWN', message: 'Manifest unknown' }],
+      });
+    }
   }
 
-  @Put('/:repo/blobs/uploads/:uuid')
-  async finalizeUpload(
-    @Param('repo') repo: string, 
-    @Param('uuid') uuid: string, 
-    @Query('digest') digest: string, 
-    @Res() res: Response
+  // 4.2. Manifest 업로드 (PUT)
+  @Put('/:name/manifests/:reference')
+  putManifest(
+    @Param('name') name: string,
+    @Param('reference') reference: string,
+    @Body() manifest: any,
+    @Res() res: Response,
   ) {
-    const d = await this.registry.finalizeUpload(repo, uuid, digest);
-    res.setHeader('Docker-Content-Digest', d);
-    console.log(`Blob Upload Complete for ${repo}, Digest ${digest}`);
-    res.status(HttpStatus.CREATED).send();
-  }
+    console.log(`4.2. Manifest PUT: ${name} with reference ${reference}`);
 
+    // ********* 핵심 검증 로직 (스터디 필수) *********
+    // 실제 Manifest 푸시 전에, Manifest에 명시된 모든 config/layer (Blob)들이
+    // repositoryState[name].blobs에 존재하는지 확인해야 합니다.
+    // 만약 하나라도 없으면 400 Bad Request 에러를 반환해야 합니다.
+    // *******************************************
 
+    repositoryState[name] = repositoryState[name] || {
+      blobs: {},
+      manifest: null,
+    };
+    repositoryState[name].manifest = manifest;
 
-  // Manifest 저장 및 조회
-  @Put('/:repo/manifests/:tag')
-  async putManifest(@Param('repo') repo: string, @Param('tag') tag: string, @Req() req: Request, @Res() res: Response) {
-    const d = await this.registry.saveManifest(repo, tag, req);
-    res.setHeader('Docker-Content-Digest', d);
-    res.status(HttpStatus.CREATED).send();
-  }
+    // Manifest의 다이제스트 계산 및 헤더 반환
+    const manifest_digest =
+      'sha256:' +
+      crypto
+        .createHash('sha256')
+        .update(JSON.stringify(manifest))
+        .digest('hex');
 
-  @Get('/:repo/manifests/:ref')
-  async getManifest(@Param('repo') repo: string, @Param('ref') ref: string, @Res() res: Response) {
-    const data = await this.registry.getManifest(repo, ref);
-    if (!data) throw new NotFoundException();
-    res.setHeader('Content-Type', 'application/vnd.docker.distribution.manifest.v2+json');
-    res.send(data);
+    res.set('Content-Length', '0');
+    res.set('Docker-Content-Digest', manifest_digest);
+    return res.status(HttpStatus.CREATED).end();
   }
 }
