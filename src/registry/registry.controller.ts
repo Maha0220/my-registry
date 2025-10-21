@@ -6,6 +6,7 @@ import {
   Head,
   Body,
   Param,
+  Req,
   Res,
   Query,
   HttpStatus,
@@ -293,7 +294,3 @@ export class RegistryController {
     return res.status(HttpStatus.CREATED).end();
   }
 }
-function Req(): (target: RegistryController, propertyKey: "appendChunk", parameterIndex: 2) => void {
-  throw new Error('Function not implemented.');
-}
-
