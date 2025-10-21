@@ -129,12 +129,53 @@ export class RegistryController {
     return res.status(HttpStatus.ACCEPTED).end();
   }
 
-  // chucked 업로드는 지원하지 않음 (임시로 405 반환)
+  // 3.4. Blob 청크 추가 (PATCH)
   @Patch('/:name/blobs/uploads/:uuid')
-  patchBlobUpload(
-    @Res() res: Response,
+  appendChunk(
+      @Param('name') name: string,
+      @Param('uuid') uuid: string,
+      @Req() req: any, // Express Request 객체를 직접 사용하여 데이터 스트림 처리
+      @Res() res: Response
   ) {
-    return res.status(HttpStatus.METHOD_NOT_ALLOWED).send('Use monolithic upload');;
+      const repoDir = this.getRepoDir(name);
+      const tempFilePath = path.join(repoDir, `${uuid}.tmp`);
+      
+      console.log(`3.4. Blob PATCH: Appending chunk to ${uuid}.tmp`);
+      
+      // 1. 임시 파일 존재 확인 (업로드 세션의 유효성 검사)
+      if (!fs.existsSync(tempFilePath)) {
+            return res.status(HttpStatus.NOT_FOUND).json({ 
+              errors: [{ code: 'BLOB_UNKNOWN', message: 'Upload session not found' }] 
+            });
+      }
+      
+      // 2. 요청 본문의 데이터를 임시 파일에 스트림으로 추가(Append)
+      const fileStream = fs.createWriteStream(tempFilePath, { flags: 'a' });
+      
+      // 데이터 전송 완료 후 처리
+      fileStream.on('finish', () => {
+          // 3. 현재 파일 크기를 확인하여 Range 헤더 반환
+          const currentSize = fs.statSync(tempFilePath).size;
+          
+          // Docker CLI는 Location 및 Range 헤더를 사용하여 다음 청크를 전송할 위치를 파악합니다.
+          res.set('Location', `/v2/${name}/blobs/uploads/${uuid}`);
+          res.set('Range', `0-${currentSize - 1}`); // 현재 저장된 바이트 범위 (0부터 크기-1까지)
+          res.set('Content-Length', '0');
+          res.set('Docker-Upload-UUID', uuid);
+          
+          console.log(`Chunk appended. Current size: ${currentSize}`);
+          return res.status(HttpStatus.ACCEPTED).end(); // 202 Accepted로 응답
+      });
+
+      fileStream.on('error', (err) => {
+          console.error('File stream error during PATCH:', err);
+          return res.status(HttpStatus.INTERNAL_SERVER_ERROR).send('File write error');
+      });
+
+      // 요청 본문(데이터 청크)을 임시 파일 스트림으로 파이프
+      // NestJS (Express)에서 Raw Body를 처리해야 할 경우, BodyParser 설정을 변경해야 할 수 있습니다.
+      // 여기서는 Express의 기본 동작을 가정하고 Request 객체를 직접 사용합니다.
+      req.pipe(fileStream); 
   }
 
   // 3.3. Blob 업로드 완료 (PUT) - Monolithic Upload (단일 요청 업로드 처리)
@@ -252,3 +293,7 @@ export class RegistryController {
     return res.status(HttpStatus.CREATED).end();
   }
 }
+function Req(): (target: RegistryController, propertyKey: "appendChunk", parameterIndex: 2) => void {
+  throw new Error('Function not implemented.');
+}
+
