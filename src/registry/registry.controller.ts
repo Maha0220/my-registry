@@ -12,7 +12,8 @@ import {
   HttpStatus,
   Patch,
 } from '@nestjs/common';
-import type { Response } from 'express';
+import type { RawBodyRequest } from '@nestjs/common';
+import type { Response, Request } from 'express';
 import * as path from 'path';
 import * as fs from 'fs';
 import * as crypto from 'crypto';
@@ -135,7 +136,7 @@ export class RegistryController {
   appendChunk(
       @Param('name') name: string,
       @Param('uuid') uuid: string,
-      @Req() req: any, // Express Request 객체를 직접 사용하여 데이터 스트림 처리
+      @Req() req: RawBodyRequest<Request>, // Express Request 객체를 직접 사용하여 데이터 스트림 처리
       @Res() res: Response
   ) {
       const repoDir = this.getRepoDir(name);
@@ -149,37 +150,31 @@ export class RegistryController {
               errors: [{ code: 'BLOB_UNKNOWN', message: 'Upload session not found' }] 
             });
       }
-      const chunkData = req.body;
       
-      if (!chunkData || chunkData.length === 0) {
-        console.warn('Received PATCH request with empty body. Returning current size.');
-        // 빈 청크를 받았을 경우, 현재 크기를 반환하여 클라이언트가 다음 시도를 하도록 유도합니다.
-      } else {
-        try {
-            // **fs.appendFileSync**를 사용하여 동기적으로 데이터를 파일에 추가합니다.
-            fs.appendFileSync(tempFilePath, chunkData);
-        } catch (error) {
-            console.error('File operation error during PATCH:', error);
-            return res.status(HttpStatus.INTERNAL_SERVER_ERROR).send('File write error');
-        }
-      }
+      // 2. 요청 본문의 데이터를 임시 파일에 스트림으로 추가(Append)
+      const fileStream = fs.createWriteStream(tempFilePath, { flags: 'a' });
+      
+      // 데이터 전송 완료 후 처리
+      fileStream.on('finish', () => {
+          // 3. 현재 파일 크기를 확인하여 Range 헤더 반환
+          const currentSize = fs.statSync(tempFilePath).size;
+          
+          // Docker CLI는 Location 및 Range 헤더를 사용하여 다음 청크를 전송할 위치를 파악합니다.
+          res.set('Location', `/v2/${name}/blobs/uploads/${uuid}`);
+          res.set('Range', `0-${currentSize - 1}`); // 현재 저장된 바이트 범위 (0부터 크기-1까지)
+          res.set('Content-Length', '0');
+          res.set('Docker-Upload-UUID', uuid);
+          
+          console.log(`Chunk appended. Current size: ${currentSize}`);
+          return res.status(HttpStatus.ACCEPTED).end(); // 202 Accepted로 응답
+      });
 
-      // 파일 쓰기가 완료된 후 (동기) 크기를 확인합니다.
-      const currentSize = fs.statSync(tempFilePath).size;
-      
-      // 4. 올바른 Range 헤더 설정: 'bytes=0-<크기-1>'
-      res.set('Location', `/v2/${name}/blobs/uploads/${uuid}`);
-      
-      // 파일 크기가 0보다 클 경우에만 -1을 적용하여 마지막 포함된 바이트 인덱스를 나타냅니다.
-      // Range 헤더는 bytes=<start>-<end> 형식이어야 합니다.
-      const rangeEnd = currentSize > 0 ? currentSize - 1 : currentSize;
-      res.set('Range', `0-${rangeEnd}`); 
-      
-      res.set('Content-Length', '0');
-      res.set('Docker-Upload-UUID', uuid);
-      
-      console.log(`Chunk appended. Current size: ${currentSize}`);
-      return res.status(HttpStatus.ACCEPTED).end(); // 202 Accepted로 응답
+      fileStream.on('error', (err) => {
+          console.error('File stream error during PATCH:', err);
+          return res.status(HttpStatus.INTERNAL_SERVER_ERROR).send('File write error');
+      });
+
+      req.pipe(fileStream);
   }
 
   // 3.3. Blob 업로드 완료 (PUT) - Monolithic Upload (단일 요청 업로드 처리)
