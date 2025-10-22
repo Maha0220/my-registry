@@ -1,0 +1,16 @@
+version: '3.9'
+
+services:
+  nest-app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: nest-app
+    ports:
+      - '5000:5000'
+    environment:
+      - NODE_ENV=production
+    volumes:
+      # 로컬 ./data → 컨테이너 내부 /app/data 로 마운트
+      - ./data:/app/data
+    restart: always

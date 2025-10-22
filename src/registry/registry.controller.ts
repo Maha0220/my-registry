@@ -4,7 +4,6 @@ import {
   Post,
   Put,
   Head,
-  Body,
   Param,
   Req,
   Res,
@@ -190,24 +189,18 @@ export class RegistryController {
         .status(HttpStatus.BAD_REQUEST)
         .send('Digest required for completion.');
     }
-
-    // Monolithic Upload: 이 요청의 body에 데이터가 담겨 있다고 가정
-    // 실제로는 스트리밍 처리 또는 PATCH/PUT 분할 처리가 필요
     const tempFilePath = path.join(this.getRepoDir(name), `${uuid}.tmp`);
 
-    // 임시 파일 대신 PUT 요청의 Body를 파일로 저장하고 검증하는 로직이 필요하지만,
-    // 여기서는 간단히 임시 파일을 최종 파일로 이름만 변경
+    // Monolithic Upload시 PATCH 없이 바로 PUT으로 완료되지만, 사용하는 도커 클라이언트에서 사용하지 않아 구현하지 않음
+    // 추가적으로 해당 PUT 요청으로 오는 optional body 데이터 처리도 필요하지만 테스트시에는 사용하지 않아 구현하지 않음
+
+    // 임시 파일을 최종 파일로 이름변경
     const digestHash = digest.split(':')[1];
     const finalBlobPath = path.join(this.getRepoDir(name), digestHash);
 
-    // 실제로는 요청 본문(req.body)을 finalBlobPath에 저장하고 다이제스트를 검증해야 함
-    // 여기서는 푸시 성공을 위해 임시 파일이 있다고 가정하고 처리 (실제 구현 시 수정 필요)
     try {
       if (fs.existsSync(tempFilePath)) {
         fs.renameSync(tempFilePath, finalBlobPath); // 임시 파일을 최종 경로로 변경
-      } else {
-        // POST/PATCH 과정 없이 바로 PUT으로 완료된 경우를 가정하여 빈 파일을 생성
-        fs.writeFileSync(finalBlobPath, Buffer.from(res.req.body || ''));
       }
     } catch (error) {
       console.error('File operation error:', error);
@@ -216,11 +209,11 @@ export class RegistryController {
         .send('File save error');
     }
 
-    repositoryState[name] = repositoryState[name] || {
-      blobs: {},
-      manifest: null,
-    };
-    repositoryState[name].blobs[digest] = finalBlobPath;
+    // repositoryState[name] = repositoryState[name] || {
+    //   blobs: {},
+    //   manifest: null,
+    // };
+    // repositoryState[name].blobs[digest] = finalBlobPath;
 
     console.log(`3.3. Blob Upload Complete for ${name}, Digest ${digest}`);
 
@@ -251,6 +244,20 @@ export class RegistryController {
       );
       return res.status(HttpStatus.OK).send(manifest);
     } else {
+      const filePath = path.join(
+        this.getRepoDir(name),
+        `manifests-${reference}.json`,
+      );
+      if (fs.existsSync(filePath)) {
+        const manifest = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+        repositoryState[name] = repositoryState[name] || {
+          blobs: {},
+          manifest: null,
+        };
+        repositoryState[name].manifest = manifest;
+        return res.status(HttpStatus.OK).send(manifest);
+      }
+
       return res.status(HttpStatus.NOT_FOUND).json({
         errors: [{ code: 'MANIFEST_UNKNOWN', message: 'Manifest unknown' }],
       });
@@ -282,16 +289,16 @@ export class RegistryController {
         manifest: null,
       };
       repositoryState[name].manifest = manifest;
-      // Manifest의 다이제스트 계산 및 헤더 반환
       const manifest_digest =
         'sha256:' +
         crypto
           .createHash('sha256')
-          .update(JSON.stringify(manifest))//warn
+          .update(JSON.stringify(manifest))
           .digest('hex');
 
       res.set('Content-Length', '0');
       res.set('Docker-Content-Digest', manifest_digest);
+      //실제로는 manifest에 대한 digest로 digest를 관리해야함 (이미지 삭제등의 로직에서 필요)
       return res.status(HttpStatus.CREATED).end();
     });
 
@@ -299,10 +306,10 @@ export class RegistryController {
         console.error('File stream error during Put manifest:', err);
         return res.status(HttpStatus.INTERNAL_SERVER_ERROR).send('File write error');
     });
-    // ********* 핵심 검증 로직 (스터디 필수) *********
+    // ********* Warning *********
     // 실제 Manifest 푸시 전에, Manifest에 명시된 모든 config/layer (Blob)들이
-    // repositoryState[name].blobs에 존재하는지 확인해야 합니다.
-    // 만약 하나라도 없으면 400 Bad Request 에러를 반환해야 합니다.
+    // repositoryState[name].blobs에 존재하는지 확인
+    // 만약 하나라도 없으면 400 Bad Request 에러를 반환
     // *******************************************
     
     req.pipe(fileStream);
