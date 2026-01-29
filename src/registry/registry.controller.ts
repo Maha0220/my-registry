@@ -10,18 +10,17 @@ import {
   Query,
   HttpStatus,
   Patch,
+  OnModuleInit,
 } from '@nestjs/common';
 import type { RawBodyRequest } from '@nestjs/common';
 import type { Response, Request } from 'express';
 import * as path from 'path';
-import * as fs from 'fs';
+import * as fs from 'fs/promises';
+import { createReadStream, createWriteStream } from 'fs';
 import * as crypto from 'crypto';
 
 // 저장소 기본 경로 설정 (프로젝트 루트의 'data' 폴더)
 const STORAGE_ROOT = path.join(process.cwd(), 'data');
-if (!fs.existsSync(STORAGE_ROOT)) {
-  fs.mkdirSync(STORAGE_ROOT);
-}
 
 // 레지스트리 메타데이터 (임시 메모리 저장소)
 const repositoryState: Record<
@@ -30,13 +29,32 @@ const repositoryState: Record<
 > = {};
 
 @Controller('v2')
-export class RegistryController {
-  private getRepoDir(name: string): string {
-    const repoPath = path.join(STORAGE_ROOT, name);
-    if (!fs.existsSync(repoPath)) {
-      fs.mkdirSync(repoPath, { recursive: true });
+export class RegistryController implements OnModuleInit {
+  async onModuleInit() {
+    await this.ensureDir(STORAGE_ROOT);
+  }
+
+  private async ensureDir(dirPath: string): Promise<void> {
+    try {
+      await fs.mkdir(dirPath, { recursive: true });
+    } catch (err: any) {
+      if (err.code !== 'EEXIST') throw err;
     }
+  }
+
+  private async getRepoDir(name: string): Promise<string> {
+    const repoPath = path.join(STORAGE_ROOT, name);
+    await this.ensureDir(repoPath);
     return repoPath;
+  }
+
+  private async fileExists(filePath: string): Promise<boolean> {
+    try {
+      await fs.access(filePath);
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   // --- 1. 기본 API 확인: GET /v2/ ---
@@ -47,6 +65,7 @@ export class RegistryController {
     return res.status(HttpStatus.OK).send({});
   }
 
+
   // 2. 인증처리 (임시로 인증 없이 허용)
 
   // ------------------------------------
@@ -55,7 +74,7 @@ export class RegistryController {
 
   // 3.1. Blob 존재 여부 확인 (HEAD) 및 다운로드 (GET)
   @Head(':name/blobs/:digest')
-  checkBlob(
+  async checkBlob(
     @Param('name') name: string,
     @Param('digest') digest: string,
     @Res() res: Response,
@@ -65,22 +84,22 @@ export class RegistryController {
     );
 
     const digestHash = digest.split(':')[1];
-    const blobPath = path.join(this.getRepoDir(name), digestHash);
+    const blobPath = path.join(await this.getRepoDir(name), digestHash);
 
-    if (fs.existsSync(blobPath)) {
-      const stats = fs.statSync(blobPath);
+    if (await this.fileExists(blobPath)) {
+      const stats = await fs.stat(blobPath);
       res.set('Content-Length', stats.size.toString());
       res.set('Docker-Content-Digest', digest);
-
-      return res.status(HttpStatus.OK).end(); // HEAD 요청
+      return res.status(HttpStatus.OK).end();
     } else {
       return res.status(HttpStatus.NOT_FOUND).json({
         errors: [{ code: 'BLOB_UNKNOWN', message: 'Blob unknown to registry' }],
       });
     }
   }
+
   @Get(':name/blobs/:digest')
-  getBlob(
+  async getBlob(
     @Param('name') name: string,
     @Param('digest') digest: string,
     @Res() res: Response,
@@ -90,17 +109,15 @@ export class RegistryController {
     );
 
     const digestHash = digest.split(':')[1];
-    const blobPath = path.join(this.getRepoDir(name), digestHash);
+    const blobPath = path.join(await this.getRepoDir(name), digestHash);
 
-    if (fs.existsSync(blobPath)) {
-      const stats = fs.statSync(blobPath);
+    if (await this.fileExists(blobPath)) {
+      const stats = await fs.stat(blobPath);
       res.set('Content-Length', stats.size.toString());
       res.set('Docker-Content-Digest', digest);
 
-      // GET 요청일 경우 파일 스트리밍
-      const fileStream = fs.createReadStream(blobPath);
+      const fileStream = createReadStream(blobPath);
       return fileStream.pipe(res.status(HttpStatus.OK));
-
     } else {
       return res.status(HttpStatus.NOT_FOUND).json({
         errors: [{ code: 'BLOB_UNKNOWN', message: 'Blob unknown to registry' }],
@@ -110,15 +127,15 @@ export class RegistryController {
 
   // 3.2. Blob 업로드 세션 시작 (POST)
   @Post('/:name/blobs/uploads')
-  startBlobUpload(@Param('name') name: string, @Res() res: Response) {
+  async startBlobUpload(@Param('name') name: string, @Res() res: Response) {
     const session_uuid = crypto.randomUUID();
     const tempFilePath = path.join(
-      this.getRepoDir(name),
+      await this.getRepoDir(name),
       `${session_uuid}.tmp`,
     );
 
     // 임시 파일 생성 (빈 파일)
-    fs.writeFileSync(tempFilePath, '');
+    await fs.writeFile(tempFilePath, '');
 
     console.log(
       `3.2. Blob Upload Session Start for ${name}: UUID ${session_uuid}`,
@@ -130,55 +147,61 @@ export class RegistryController {
     return res.status(HttpStatus.ACCEPTED).end();
   }
 
+
   // 3.4. Blob 청크 추가 (PATCH)
   @Patch('/:name/blobs/uploads/:uuid')
-  appendChunk(
-      @Param('name') name: string,
-      @Param('uuid') uuid: string,
-      @Req() req: RawBodyRequest<Request>,
-      @Res() res: Response
+  async appendChunk(
+    @Param('name') name: string,
+    @Param('uuid') uuid: string,
+    @Req() req: RawBodyRequest<Request>,
+    @Res() res: Response,
   ) {
-      const repoDir = this.getRepoDir(name);
-      const tempFilePath = path.join(repoDir, `${uuid}.tmp`);
-      
-      console.log(`3.4. Blob PATCH: Appending chunk to ${uuid}.tmp`);
-      
-      // 1. 임시 파일 존재 확인 (업로드 세션의 유효성 검사)
-      if (!fs.existsSync(tempFilePath)) {
-            return res.status(HttpStatus.NOT_FOUND).json({ 
-              errors: [{ code: 'BLOB_UNKNOWN', message: 'Upload session not found' }] 
-            });
-      }
-      
-      // 2. 요청 본문의 데이터를 임시 파일에 스트림으로 추가(Append)
-      const fileStream = fs.createWriteStream(tempFilePath, { flags: 'a' });
-      
-      // 데이터 전송 완료 후 처리
-      fileStream.on('finish', () => {
-          // 3. 현재 파일 크기를 확인하여 Range 헤더 반환
-          const currentSize = fs.statSync(tempFilePath).size;
-          
-          // Docker CLI는 Location 및 Range 헤더를 사용하여 다음 청크를 전송할 위치를 파악합니다.
-          res.set('Location', `/v2/${name}/blobs/uploads/${uuid}`);
-          res.set('Range', `0-${currentSize - 1}`); // 현재 저장된 바이트 범위 (0부터 크기-1까지)
-          res.set('Content-Length', '0');
-          res.set('Docker-Upload-UUID', uuid);
-          
-          console.log(`Chunk appended. Current size: ${currentSize}`);
-          return res.status(HttpStatus.ACCEPTED).end(); // 202 Accepted로 응답
-      });
+    const repoDir = await this.getRepoDir(name);
+    const tempFilePath = path.join(repoDir, `${uuid}.tmp`);
 
-      fileStream.on('error', (err) => {
-          console.error('File stream error during PATCH:', err);
-          return res.status(HttpStatus.INTERNAL_SERVER_ERROR).send('File write error');
-      });
+    console.log(`3.4. Blob PATCH: Appending chunk to ${uuid}.tmp`);
 
-      req.pipe(fileStream);
+    // 1. 임시 파일 존재 확인 (업로드 세션의 유효성 검사)
+    if (!(await this.fileExists(tempFilePath))) {
+      return res.status(HttpStatus.NOT_FOUND).json({
+        errors: [
+          { code: 'BLOB_UNKNOWN', message: 'Upload session not found' },
+        ],
+      });
+    }
+
+    // 2. 요청 본문의 데이터를 임시 파일에 스트림으로 추가(Append)
+    const fileStream = createWriteStream(tempFilePath, { flags: 'a' });
+
+    // 데이터 전송 완료 후 처리
+    fileStream.on('finish', async () => {
+      // 3. 현재 파일 크기를 확인하여 Range 헤더 반환
+      const stats = await fs.stat(tempFilePath);
+      const currentSize = stats.size;
+
+      // Docker CLI는 Location 및 Range 헤더를 사용하여 다음 청크를 전송할 위치를 파악합니다.
+      res.set('Location', `/v2/${name}/blobs/uploads/${uuid}`);
+      res.set('Range', `0-${currentSize - 1}`); // 현재 저장된 바이트 범위 (0부터 크기-1까지)
+      res.set('Content-Length', '0');
+      res.set('Docker-Upload-UUID', uuid);
+
+      console.log(`Chunk appended. Current size: ${currentSize}`);
+      return res.status(HttpStatus.ACCEPTED).end(); // 202 Accepted로 응답
+    });
+
+    fileStream.on('error', (err) => {
+      console.error('File stream error during PATCH:', err);
+      return res
+        .status(HttpStatus.INTERNAL_SERVER_ERROR)
+        .send('File write error');
+    });
+
+    req.pipe(fileStream);
   }
 
   // 3.3. Blob 업로드 완료 (PUT)
   @Put('/:name/blobs/uploads/:uuid')
-  completeBlobUpload(
+  async completeBlobUpload(
     @Param('name') name: string,
     @Param('uuid') uuid: string,
     @Query('digest') digest: string,
@@ -189,18 +212,20 @@ export class RegistryController {
         .status(HttpStatus.BAD_REQUEST)
         .send('Digest required for completion.');
     }
-    const tempFilePath = path.join(this.getRepoDir(name), `${uuid}.tmp`);
+
+    const repoDir = await this.getRepoDir(name);
+    const tempFilePath = path.join(repoDir, `${uuid}.tmp`);
 
     // Monolithic Upload시 PATCH 없이 바로 PUT으로 완료되지만, 사용하는 도커 클라이언트에서 사용하지 않아 구현하지 않음
     // 추가적으로 해당 PUT 요청으로 오는 optional body 데이터 처리도 필요하지만 테스트시에는 사용하지 않아 구현하지 않음
 
     // 임시 파일을 최종 파일로 이름변경
     const digestHash = digest.split(':')[1];
-    const finalBlobPath = path.join(this.getRepoDir(name), digestHash);
+    const finalBlobPath = path.join(repoDir, digestHash);
 
     try {
-      if (fs.existsSync(tempFilePath)) {
-        fs.renameSync(tempFilePath, finalBlobPath); // 임시 파일을 최종 경로로 변경
+      if (await this.fileExists(tempFilePath)) {
+        await fs.rename(tempFilePath, finalBlobPath); // 임시 파일을 최종 경로로 변경
       }
     } catch (error) {
       console.error('File operation error:', error);
@@ -222,13 +247,14 @@ export class RegistryController {
     return res.status(HttpStatus.CREATED).end();
   }
 
+
   // ------------------------------------
   // --- 4. 매니페스트 (Manifest) 처리 ---
   // ------------------------------------
 
   // 4.1. Manifest 다운로드 (GET)
   @Get('/:name/manifests/:reference')
-  getManifest(
+  async getManifest(
     @Param('name') name: string,
     @Param('reference') reference: string,
     @Res() res: Response,
@@ -240,16 +266,18 @@ export class RegistryController {
       res.set(
         'Content-Type',
         manifest.mediaType ||
-          'application/vnd.docker.distribution.manifest.v2+json',
+        'application/vnd.docker.distribution.manifest.v2+json',
       );
       return res.status(HttpStatus.OK).send(manifest);
     } else {
       const filePath = path.join(
-        this.getRepoDir(name),
+        await this.getRepoDir(name),
         `manifests-${reference}.json`,
       );
-      if (fs.existsSync(filePath)) {
-        const manifest = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+
+      if (await this.fileExists(filePath)) {
+        const content = await fs.readFile(filePath, 'utf-8');
+        const manifest = JSON.parse(content);
         repositoryState[name] = repositoryState[name] || {
           blobs: {},
           manifest: null,
@@ -266,7 +294,7 @@ export class RegistryController {
 
   // 4.2. Manifest 업로드 (PUT)
   @Put('/:name/manifests/:reference')
-  putManifest(
+  async putManifest(
     @Param('name') name: string,
     @Param('reference') reference: string,
     @Req() req: RawBodyRequest<Request>,
@@ -275,20 +303,21 @@ export class RegistryController {
     console.log(`4.2. Manifest PUT: ${name} with reference ${reference}`);
 
     const filePath = path.join(
-      this.getRepoDir(name),
+      await this.getRepoDir(name),
       `manifests-${reference}.json`,
     );
 
-    const fileStream = fs.createWriteStream(filePath, { flags: 'w' });
-    
-    fileStream.on('finish', () => {
+    const fileStream = createWriteStream(filePath, { flags: 'w' });
 
-      const manifest = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+    fileStream.on('finish', async () => {
+      const content = await fs.readFile(filePath, 'utf-8');
+      const manifest = JSON.parse(content);
       repositoryState[name] = repositoryState[name] || {
         blobs: {},
         manifest: null,
       };
       repositoryState[name].manifest = manifest;
+
       const manifest_digest =
         'sha256:' +
         crypto
@@ -303,15 +332,17 @@ export class RegistryController {
     });
 
     fileStream.on('error', (err) => {
-        console.error('File stream error during Put manifest:', err);
-        return res.status(HttpStatus.INTERNAL_SERVER_ERROR).send('File write error');
+      console.error('File stream error during Put manifest:', err);
+      return res
+        .status(HttpStatus.INTERNAL_SERVER_ERROR)
+        .send('File write error');
     });
     // ********* Warning *********
     // 실제 Manifest 푸시 전에, Manifest에 명시된 모든 config/layer (Blob)들이
     // repositoryState[name].blobs에 존재하는지 확인
     // 만약 하나라도 없으면 400 Bad Request 에러를 반환
     // *******************************************
-    
+
     req.pipe(fileStream);
   }
 }
