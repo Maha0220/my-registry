@@ -3,7 +3,6 @@
 보안
 - 인증/인가 구현 (Basic Auth, Bearer Token/JWT)
 - 사용자별 repository 접근 권한 관리
-- Rate limiting
 
 데이터 무결성
 - Digest 검증 (업로드된 blob의 실제 SHA256 vs 클라이언트 제공 digest 비교)
