@@ -1,98 +1,149 @@
-<p align="center">
-  <a href="http://nestjs.com/" target="blank"><img src="https://nestjs.com/img/logo-small.svg" width="120" alt="Nest Logo" /></a>
-</p>
+# My Registry
 
-[circleci-image]: https://img.shields.io/circleci/build/github/nestjs/nest/master?token=abc123def456
-[circleci-url]: https://circleci.com/gh/nestjs/nest
+Docker Registry API v2 호환 이미지 저장소 서버입니다. NestJS로 구현되었으며, Docker CLI를 통한 이미지 push/pull을 지원합니다.
 
-  <p align="center">A progressive <a href="http://nodejs.org" target="_blank">Node.js</a> framework for building efficient and scalable server-side applications.</p>
-    <p align="center">
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/v/@nestjs/core.svg" alt="NPM Version" /></a>
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/l/@nestjs/core.svg" alt="Package License" /></a>
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/dm/@nestjs/common.svg" alt="NPM Downloads" /></a>
-<a href="https://circleci.com/gh/nestjs/nest" target="_blank"><img src="https://img.shields.io/circleci/build/github/nestjs/nest/master" alt="CircleCI" /></a>
-<a href="https://discord.gg/G7Qnnhy" target="_blank"><img src="https://img.shields.io/badge/discord-online-brightgreen.svg" alt="Discord"/></a>
-<a href="https://opencollective.com/nest#backer" target="_blank"><img src="https://opencollective.com/nest/backers/badge.svg" alt="Backers on Open Collective" /></a>
-<a href="https://opencollective.com/nest#sponsor" target="_blank"><img src="https://opencollective.com/nest/sponsors/badge.svg" alt="Sponsors on Open Collective" /></a>
-  <a href="https://paypal.me/kamilmysliwiec" target="_blank"><img src="https://img.shields.io/badge/Donate-PayPal-ff3f59.svg" alt="Donate us"/></a>
-    <a href="https://opencollective.com/nest#sponsor"  target="_blank"><img src="https://img.shields.io/badge/Support%20us-Open%20Collective-41B883.svg" alt="Support us"></a>
-  <a href="https://twitter.com/nestframework" target="_blank"><img src="https://img.shields.io/twitter/follow/nestframework.svg?style=social&label=Follow" alt="Follow us on Twitter"></a>
-</p>
-  <!--[![Backers on Open Collective](https://opencollective.com/nest/backers/badge.svg)](https://opencollective.com/nest#backer)
-  [![Sponsors on Open Collective](https://opencollective.com/nest/sponsors/badge.svg)](https://opencollective.com/nest#sponsor)-->
+## 기능
 
-## Description
+- Docker Registry HTTP API V2 호환
+- 이미지 Push/Pull 지원
+- Blob 청크 업로드
+- Manifest 관리
+- 이미지/Blob 삭제
+- Garbage Collection
+- Catalog API (repository/tag 목록)
+- Health Check 엔드포인트
+- 요청 ID 기반 로깅
 
-[Nest](https://github.com/nestjs/nest) framework TypeScript starter repository.
+## 빠른 시작
 
-## Project setup
+### 로컬 실행
 
 ```bash
-$ npm install
+# 의존성 설치
+npm install
+
+# 개발 모드 실행
+npm run start:dev
+
+# 프로덕션 빌드 및 실행
+npm run build
+npm run start:prod
 ```
 
-## Compile and run the project
+### Docker 실행
 
 ```bash
-# development
-$ npm run start
+# Docker Compose로 실행
+npm run compose:up
 
-# watch mode
-$ npm run start:dev
-
-# production mode
-$ npm run start:prod
+# 중지
+npm run compose:down
 ```
 
-## Run tests
+## 환경 변수
+
+`.env` 파일 또는 환경 변수로 설정:
+
+| 변수 | 설명 | 기본값 |
+|------|------|--------|
+| `PORT` | 서버 포트 | `5000` |
+| `STORAGE_ROOT` | 이미지 저장 경로 | `./data` |
+
+## API 엔드포인트
+
+### 기본
+
+| Method | Path | 설명 |
+|--------|------|------|
+| GET | `/v2/` | API 버전 확인 |
+| GET | `/health` | 헬스체크 |
+| GET | `/health/live` | Liveness probe |
+| GET | `/health/ready` | Readiness probe |
+
+### Catalog
+
+| Method | Path | 설명 |
+|--------|------|------|
+| GET | `/v2/_catalog` | Repository 목록 |
+| GET | `/v2/:name/tags/list` | 태그 목록 |
+
+### Blob
+
+| Method | Path | 설명 |
+|--------|------|------|
+| HEAD | `/v2/:name/blobs/:digest` | Blob 존재 확인 |
+| GET | `/v2/:name/blobs/:digest` | Blob 다운로드 |
+| POST | `/v2/:name/blobs/uploads` | 업로드 세션 시작 |
+| PATCH | `/v2/:name/blobs/uploads/:uuid` | 청크 업로드 |
+| PUT | `/v2/:name/blobs/uploads/:uuid?digest=` | 업로드 완료 |
+| DELETE | `/v2/:name/blobs/:digest` | Blob 삭제 |
+
+### Manifest
+
+| Method | Path | 설명 |
+|--------|------|------|
+| GET | `/v2/:name/manifests/:reference` | Manifest 조회 |
+| PUT | `/v2/:name/manifests/:reference` | Manifest 업로드 |
+| DELETE | `/v2/:name/manifests/:reference` | Manifest 삭제 |
+
+### Garbage Collection
+
+| Method | Path | 설명 |
+|--------|------|------|
+| POST | `/v2/_gc` | 전체 GC 실행 |
+| POST | `/v2/:name/_gc` | 특정 repo GC 실행 |
+
+## Docker CLI 사용법
 
 ```bash
-# unit tests
-$ npm run test
+# 레지스트리에 이미지 태그
+docker tag myimage:latest localhost:5000/myimage:latest
 
-# e2e tests
-$ npm run test:e2e
+# 이미지 Push
+docker push localhost:5000/myimage:latest
 
-# test coverage
-$ npm run test:cov
+# 이미지 Pull
+docker pull localhost:5000/myimage:latest
 ```
 
-## Deployment
+> 참고: 로컬 개발 시 insecure registry 설정이 필요할 수 있습니다.
+> Docker Desktop > Settings > Docker Engine에서 `"insecure-registries": ["localhost:5000"]` 추가
 
-When you're ready to deploy your NestJS application to production, there are some key steps you can take to ensure it runs as efficiently as possible. Check out the [deployment documentation](https://docs.nestjs.com/deployment) for more information.
-
-If you are looking for a cloud-based platform to deploy your NestJS application, check out [Mau](https://mau.nestjs.com), our official platform for deploying NestJS applications on AWS. Mau makes deployment straightforward and fast, requiring just a few simple steps:
+## 테스트
 
 ```bash
-$ npm install -g @nestjs/mau
-$ mau deploy
+# 단위 테스트
+npm run test
+
+# E2E 테스트
+npm run test:e2e
+
+# 테스트 커버리지
+npm run test:cov
 ```
 
-With Mau, you can deploy your application in just a few clicks, allowing you to focus on building features rather than managing infrastructure.
+## 프로젝트 구조
 
-## Resources
+```
+src/
+├── common/
+│   ├── filters/          # Exception filters
+│   └── middleware/       # Request ID middleware
+├── health/               # Health check module
+├── registry/             # Registry API module
+│   ├── registry.controller.ts
+│   ├── registry.service.ts
+│   └── registry.module.ts
+├── app.module.ts
+└── main.ts
+```
 
-Check out a few resources that may come in handy when working with NestJS:
+## 제한사항
 
-- Visit the [NestJS Documentation](https://docs.nestjs.com) to learn more about the framework.
-- For questions and support, please visit our [Discord channel](https://discord.gg/G7Qnnhy).
-- To dive deeper and get more hands-on experience, check out our official video [courses](https://courses.nestjs.com/).
-- Deploy your application to AWS with the help of [NestJS Mau](https://mau.nestjs.com) in just a few clicks.
-- Visualize your application graph and interact with the NestJS application in real-time using [NestJS Devtools](https://devtools.nestjs.com).
-- Need help with your project (part-time to full-time)? Check out our official [enterprise support](https://enterprise.nestjs.com).
-- To stay in the loop and get updates, follow us on [X](https://x.com/nestframework) and [LinkedIn](https://linkedin.com/company/nestjs).
-- Looking for a job, or have a job to offer? Check out our official [Jobs board](https://jobs.nestjs.com).
+- 인증/인가 미구현 (모든 요청 허용)
+- 단일 노드 환경 (분산 스토리지 미지원)
+- 메모리 기반 메타데이터 캐시 (서버 재시작 시 캐시 초기화)
 
-## Support
+## 라이선스
 
-Nest is an MIT-licensed open source project. It can grow thanks to the sponsors and support by the amazing backers. If you'd like to join them, please [read more here](https://docs.nestjs.com/support).
-
-## Stay in touch
-
-- Author - [Kamil Myśliwiec](https://twitter.com/kammysliwiec)
-- Website - [https://nestjs.com](https://nestjs.com/)
-- Twitter - [@nestframework](https://twitter.com/nestframework)
-
-## License
-
-Nest is [MIT licensed](https://github.com/nestjs/nest/blob/master/LICENSE).
+UNLICENSED
