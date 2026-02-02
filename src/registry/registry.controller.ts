@@ -10,52 +10,14 @@ import {
   Query,
   HttpStatus,
   Patch,
-  OnModuleInit,
 } from '@nestjs/common';
 import type { RawBodyRequest } from '@nestjs/common';
 import type { Response, Request } from 'express';
-import * as path from 'path';
-import * as fs from 'fs/promises';
-import { createReadStream, createWriteStream } from 'fs';
-import * as crypto from 'crypto';
-
-// 저장소 기본 경로 설정 (프로젝트 루트의 'data' 폴더)
-const STORAGE_ROOT = path.join(process.cwd(), 'data');
-
-// 레지스트리 메타데이터 (임시 메모리 저장소)
-const repositoryState: Record<
-  string,
-  { blobs: Record<string, string>; manifest: any }
-> = {};
+import { RegistryService } from './registry.service';
 
 @Controller('v2')
-export class RegistryController implements OnModuleInit {
-  async onModuleInit() {
-    await this.ensureDir(STORAGE_ROOT);
-  }
-
-  private async ensureDir(dirPath: string): Promise<void> {
-    try {
-      await fs.mkdir(dirPath, { recursive: true });
-    } catch (err: any) {
-      if (err.code !== 'EEXIST') throw err;
-    }
-  }
-
-  private async getRepoDir(name: string): Promise<string> {
-    const repoPath = path.join(STORAGE_ROOT, name);
-    await this.ensureDir(repoPath);
-    return repoPath;
-  }
-
-  private async fileExists(filePath: string): Promise<boolean> {
-    try {
-      await fs.access(filePath);
-      return true;
-    } catch {
-      return false;
-    }
-  }
+export class RegistryController {
+  constructor(private readonly registryService: RegistryService) { }
 
   // --- 1. 기본 API 확인: GET /v2/ ---
   @Get('/')
@@ -64,7 +26,6 @@ export class RegistryController implements OnModuleInit {
     res.set('Docker-Distribution-API-Version', 'registry/2.0');
     return res.status(HttpStatus.OK).send({});
   }
-
 
   // 2. 인증처리 (임시로 인증 없이 허용)
 
@@ -83,12 +44,10 @@ export class RegistryController implements OnModuleInit {
       `3.1. Blob ${res.req.method} Check: ${name} with digest ${digest}`,
     );
 
-    const digestHash = digest.split(':')[1];
-    const blobPath = path.join(await this.getRepoDir(name), digestHash);
+    const blobInfo = await this.registryService.checkBlobExists(name, digest);
 
-    if (await this.fileExists(blobPath)) {
-      const stats = await fs.stat(blobPath);
-      res.set('Content-Length', stats.size.toString());
+    if (blobInfo.exists) {
+      res.set('Content-Length', blobInfo.size!.toString());
       res.set('Docker-Content-Digest', digest);
       return res.status(HttpStatus.OK).end();
     } else {
@@ -97,6 +56,7 @@ export class RegistryController implements OnModuleInit {
       });
     }
   }
+
 
   @Get(':name/blobs/:digest')
   async getBlob(
@@ -108,15 +68,13 @@ export class RegistryController implements OnModuleInit {
       `3.1. Blob ${res.req.method} Check: ${name} with digest ${digest}`,
     );
 
-    const digestHash = digest.split(':')[1];
-    const blobPath = path.join(await this.getRepoDir(name), digestHash);
+    const blobInfo = await this.registryService.checkBlobExists(name, digest);
 
-    if (await this.fileExists(blobPath)) {
-      const stats = await fs.stat(blobPath);
-      res.set('Content-Length', stats.size.toString());
+    if (blobInfo.exists) {
+      res.set('Content-Length', blobInfo.size!.toString());
       res.set('Docker-Content-Digest', digest);
 
-      const fileStream = createReadStream(blobPath);
+      const fileStream = this.registryService.createBlobReadStream(blobInfo.path!);
       return fileStream.pipe(res.status(HttpStatus.OK));
     } else {
       return res.status(HttpStatus.NOT_FOUND).json({
@@ -128,25 +86,15 @@ export class RegistryController implements OnModuleInit {
   // 3.2. Blob 업로드 세션 시작 (POST)
   @Post('/:name/blobs/uploads')
   async startBlobUpload(@Param('name') name: string, @Res() res: Response) {
-    const session_uuid = crypto.randomUUID();
-    const tempFilePath = path.join(
-      await this.getRepoDir(name),
-      `${session_uuid}.tmp`,
-    );
+    const { uuid } = await this.registryService.createUploadSession(name);
 
-    // 임시 파일 생성 (빈 파일)
-    await fs.writeFile(tempFilePath, '');
+    console.log(`3.2. Blob Upload Session Start for ${name}: UUID ${uuid}`);
 
-    console.log(
-      `3.2. Blob Upload Session Start for ${name}: UUID ${session_uuid}`,
-    );
-
-    res.set('Location', `/v2/${name}/blobs/uploads/${session_uuid}`);
+    res.set('Location', `/v2/${name}/blobs/uploads/${uuid}`);
     res.set('Range', '0-0');
-    res.set('Docker-Upload-UUID', session_uuid);
+    res.set('Docker-Upload-UUID', uuid);
     return res.status(HttpStatus.ACCEPTED).end();
   }
-
 
   // 3.4. Blob 청크 추가 (PATCH)
   @Patch('/:name/blobs/uploads/:uuid')
@@ -156,13 +104,12 @@ export class RegistryController implements OnModuleInit {
     @Req() req: RawBodyRequest<Request>,
     @Res() res: Response,
   ) {
-    const repoDir = await this.getRepoDir(name);
-    const tempFilePath = path.join(repoDir, `${uuid}.tmp`);
+    const tempFilePath = await this.registryService.getTempFilePath(name, uuid);
 
     console.log(`3.4. Blob PATCH: Appending chunk to ${uuid}.tmp`);
 
     // 1. 임시 파일 존재 확인 (업로드 세션의 유효성 검사)
-    if (!(await this.fileExists(tempFilePath))) {
+    if (!(await this.registryService.fileExists(tempFilePath))) {
       return res.status(HttpStatus.NOT_FOUND).json({
         errors: [
           { code: 'BLOB_UNKNOWN', message: 'Upload session not found' },
@@ -171,13 +118,12 @@ export class RegistryController implements OnModuleInit {
     }
 
     // 2. 요청 본문의 데이터를 임시 파일에 스트림으로 추가(Append)
-    const fileStream = createWriteStream(tempFilePath, { flags: 'a' });
+    const fileStream = this.registryService.createAppendStream(tempFilePath);
 
     // 데이터 전송 완료 후 처리
     fileStream.on('finish', async () => {
       // 3. 현재 파일 크기를 확인하여 Range 헤더 반환
-      const stats = await fs.stat(tempFilePath);
-      const currentSize = stats.size;
+      const currentSize = await this.registryService.getFileSize(tempFilePath);
 
       // Docker CLI는 Location 및 Range 헤더를 사용하여 다음 청크를 전송할 위치를 파악합니다.
       res.set('Location', `/v2/${name}/blobs/uploads/${uuid}`);
@@ -199,6 +145,7 @@ export class RegistryController implements OnModuleInit {
     req.pipe(fileStream);
   }
 
+
   // 3.3. Blob 업로드 완료 (PUT)
   @Put('/:name/blobs/uploads/:uuid')
   async completeBlobUpload(
@@ -213,32 +160,13 @@ export class RegistryController implements OnModuleInit {
         .send('Digest required for completion.');
     }
 
-    const repoDir = await this.getRepoDir(name);
-    const tempFilePath = path.join(repoDir, `${uuid}.tmp`);
+    const result = await this.registryService.completeBlobUpload(name, uuid, digest);
 
-    // Monolithic Upload시 PATCH 없이 바로 PUT으로 완료되지만, 사용하는 도커 클라이언트에서 사용하지 않아 구현하지 않음
-    // 추가적으로 해당 PUT 요청으로 오는 optional body 데이터 처리도 필요하지만 테스트시에는 사용하지 않아 구현하지 않음
-
-    // 임시 파일을 최종 파일로 이름변경
-    const digestHash = digest.split(':')[1];
-    const finalBlobPath = path.join(repoDir, digestHash);
-
-    try {
-      if (await this.fileExists(tempFilePath)) {
-        await fs.rename(tempFilePath, finalBlobPath); // 임시 파일을 최종 경로로 변경
-      }
-    } catch (error) {
-      console.error('File operation error:', error);
+    if (!result.success) {
       return res
         .status(HttpStatus.INTERNAL_SERVER_ERROR)
-        .send('File save error');
+        .send(result.error);
     }
-
-    // repositoryState[name] = repositoryState[name] || {
-    //   blobs: {},
-    //   manifest: null,
-    // };
-    // repositoryState[name].blobs[digest] = finalBlobPath;
 
     console.log(`3.3. Blob Upload Complete for ${name}, Digest ${digest}`);
 
@@ -246,7 +174,6 @@ export class RegistryController implements OnModuleInit {
     res.set('Docker-Content-Digest', digest);
     return res.status(HttpStatus.CREATED).end();
   }
-
 
   // ------------------------------------
   // --- 4. 매니페스트 (Manifest) 처리 ---
@@ -260,36 +187,17 @@ export class RegistryController implements OnModuleInit {
     @Res() res: Response,
   ) {
     console.log(`4.1. Manifest GET: ${name} with reference ${reference}`);
-    const manifest = repositoryState[name]?.manifest;
 
-    if (manifest) {
-      res.set(
-        'Content-Type',
-        manifest.mediaType ||
-        'application/vnd.docker.distribution.manifest.v2+json',
-      );
-      return res.status(HttpStatus.OK).send(manifest);
-    } else {
-      const filePath = path.join(
-        await this.getRepoDir(name),
-        `manifests-${reference}.json`,
-      );
+    const manifestInfo = await this.registryService.getManifest(name, reference);
 
-      if (await this.fileExists(filePath)) {
-        const content = await fs.readFile(filePath, 'utf-8');
-        const manifest = JSON.parse(content);
-        repositoryState[name] = repositoryState[name] || {
-          blobs: {},
-          manifest: null,
-        };
-        repositoryState[name].manifest = manifest;
-        return res.status(HttpStatus.OK).send(manifest);
-      }
-
-      return res.status(HttpStatus.NOT_FOUND).json({
-        errors: [{ code: 'MANIFEST_UNKNOWN', message: 'Manifest unknown' }],
-      });
+    if (manifestInfo.exists) {
+      res.set('Content-Type', manifestInfo.mediaType!);
+      return res.status(HttpStatus.OK).send(manifestInfo.manifest);
     }
+
+    return res.status(HttpStatus.NOT_FOUND).json({
+      errors: [{ code: 'MANIFEST_UNKNOWN', message: 'Manifest unknown' }],
+    });
   }
 
   // 4.2. Manifest 업로드 (PUT)
@@ -302,32 +210,14 @@ export class RegistryController implements OnModuleInit {
   ) {
     console.log(`4.2. Manifest PUT: ${name} with reference ${reference}`);
 
-    const filePath = path.join(
-      await this.getRepoDir(name),
-      `manifests-${reference}.json`,
-    );
-
-    const fileStream = createWriteStream(filePath, { flags: 'w' });
+    const filePath = await this.registryService.getManifestFilePath(name, reference);
+    const fileStream = this.registryService.createManifestWriteStream(filePath);
 
     fileStream.on('finish', async () => {
-      const content = await fs.readFile(filePath, 'utf-8');
-      const manifest = JSON.parse(content);
-      repositoryState[name] = repositoryState[name] || {
-        blobs: {},
-        manifest: null,
-      };
-      repositoryState[name].manifest = manifest;
-
-      const manifest_digest =
-        'sha256:' +
-        crypto
-          .createHash('sha256')
-          .update(JSON.stringify(manifest))
-          .digest('hex');
+      const manifestDigest = await this.registryService.saveManifestToCache(name, filePath);
 
       res.set('Content-Length', '0');
-      res.set('Docker-Content-Digest', manifest_digest);
-      //실제로는 manifest에 대한 digest로 digest를 관리해야함 (이미지 삭제등의 로직에서 필요)
+      res.set('Docker-Content-Digest', manifestDigest);
       return res.status(HttpStatus.CREATED).end();
     });
 
